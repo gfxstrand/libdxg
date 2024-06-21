@@ -33,11 +33,12 @@ install_headers(
   'include/d3dkmthk.h',
   'include/d3dkmdt.h',
   'include/d3dukmdt.h',
+  'include/pdd_log_iface.h',
   subdir : 'dxg')
 
 libdxg = library(
   'dxg',
-  'src/d3dkmt-wsl.cpp',
+  files('src/d3dkmt-wsl.cpp', 'src/PDDLogger.cpp'),
   version: '1.0.0',
   include_directories : inc_dirs,
   cpp_args: cppargs,

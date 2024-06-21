@@ -22,6 +22,10 @@
 #include <d3dkmthk.h>
 #include <errno.h>
 
+#include <stdio.h>
+
+#include "PDDLogger.hpp"
+
 #define LINUX_PUBLIC __attribute__((visibility("default")))
 
 #define RETURN_IF_NTSTATUS_FAILED(expr) do { NTSTATUS __statusRet = (expr); if (!NT_SUCCESS(__statusRet)) { return __statusRet; }} while (0)
@@ -50,11 +54,16 @@ NTSTATUS LinuxErrToNTSTATUS(int err)
     }
 }
 
+#define LOG_CONST_ARGS
+#define LOG_NONCONST_ARGS logger.set_args(*pArgs);
+
 #define DEFINE_KMT_WITH_RETRY(CamelCaseName, ARGSSTRUCT, IoctlId, Constness) \
     NTSTATUS APIENTRY LINUX_PUBLIC D3DKMT##CamelCaseName(ARGSSTRUCT Constness * pArgs) \
     { \
         if (DxgFd == -1) \
             return STATUS_UNSUCCESSFUL; \
+        PDDLogger logger(#CamelCaseName, 0); \
+        logger.set_args(*pArgs); \
         int ioctlret = ioctl(DxgFd, _IOWR('G', IoctlId, ARGSSTRUCT), pArgs); \
         if (ioctlret == -1 && (errno == ENOTTY || errno == EBADF)) { \
             close(DxgFd); \
@@ -62,6 +71,7 @@ NTSTATUS LinuxErrToNTSTATUS(int err)
             ioctlret = ioctl(DxgFd, _IOWR('G', IoctlId, ARGSSTRUCT), pArgs); \
         } \
         if (ioctlret == -1) return LinuxErrToNTSTATUS(errno); \
+        LOG_##Constness##_ARGS \
         return ioctlret; \
     }
 
@@ -70,8 +80,24 @@ NTSTATUS LinuxErrToNTSTATUS(int err)
     { \
         if (DxgFd == -1) \
             return STATUS_UNSUCCESSFUL; \
+        PDDLogger logger(#CamelCaseName, 0); \
+        logger.set_args(*pArgs); \
         int ioctlret = ioctl(DxgFd, _IOWR('G', IoctlId, ARGSSTRUCT), pArgs); \
         if (ioctlret == -1) return LinuxErrToNTSTATUS(errno); \
+        LOG_##Constness##_ARGS \
+        return ioctlret; \
+    }
+
+#define DEFINE_KMT_WITH_PDATA(CamelCaseName, ARGSSTRUCT, IoctlId, Constness) \
+    NTSTATUS APIENTRY LINUX_PUBLIC D3DKMT##CamelCaseName(ARGSSTRUCT Constness * pArgs) \
+    { \
+        if (DxgFd == -1) \
+            return STATUS_UNSUCCESSFUL; \
+        PDDLogger logger(#CamelCaseName, 0); \
+        logger.set_args_with_pdata(*pArgs); \
+        int ioctlret = ioctl(DxgFd, _IOWR('G', IoctlId, ARGSSTRUCT), pArgs); \
+        if (ioctlret == -1) return LinuxErrToNTSTATUS(errno); \
+        LOG_##Constness##_ARGS \
         return ioctlret; \
     }
 #define NONCONST
@@ -87,23 +113,46 @@ NTSTATUS LinuxErrToNTSTATUS(int err)
         return STATUS_SUCCESS; \
     }
 
+NTSTATUS APIENTRY LINUX_PUBLIC
+D3DKMTCreateAllocation2(D3DKMT_CREATEALLOCATION NONCONST *pArgs)
+{
+    if (DxgFd == -1)
+        return STATUS_UNSUCCESSFUL;
+
+    PDDLogger logger("CreateAllocation2", pArgs->NumAllocations);
+    logger.set_args(*pArgs);
+    if (!pArgs->Flags.StandardAllocation)
+        logger.set_pdata(*pArgs);
+    for (unsigned i = 0; i < pArgs->NumAllocations; i++)
+        logger.set_child_args_with_pdata(i, pArgs->pAllocationInfo2[i]);
+
+    int ioctlret = ioctl(DxgFd, _IOWR('G', 0x6, D3DKMT_CREATEALLOCATION), pArgs);
+    if (ioctlret == -1)
+        return LinuxErrToNTSTATUS(errno);
+
+    for (unsigned i = 0; i < pArgs->NumAllocations; i++)
+        logger.set_child_args_with_pdata(i, pArgs->pAllocationInfo2[i]);
+
+    return ioctlret;
+}
+
 // Simple thunks
 // The definitions of these ioctl opcodes come from /onecore/vm/wsl/lxcore/ioctl.h.
 DEFINE_KMT_WITH_RETRY(OpenAdapterFromLuid, D3DKMT_OPENADAPTERFROMLUID, 0x1, CONST)
 DEFINE_KMT(CreateDevice, D3DKMT_CREATEDEVICE, 0x2, NONCONST)
-DEFINE_KMT(CreateContext, D3DKMT_CREATECONTEXT, 0x3, NONCONST)
-DEFINE_KMT(CreateContextVirtual, D3DKMT_CREATECONTEXTVIRTUAL, 0x4, NONCONST)
+DEFINE_KMT_WITH_PDATA(CreateContext, D3DKMT_CREATECONTEXT, 0x3, NONCONST)
+DEFINE_KMT_WITH_PDATA(CreateContextVirtual, D3DKMT_CREATECONTEXTVIRTUAL, 0x4, NONCONST)
 DEFINE_KMT(DestroyContext, D3DKMT_DESTROYCONTEXT, 0x5, CONST)
-DEFINE_KMT(CreateAllocation2, D3DKMT_CREATEALLOCATION, 0x6, NONCONST)
+//DEFINE_KMT(CreateAllocation2, D3DKMT_CREATEALLOCATION, 0x6, NONCONST)
 DEFINE_KMT(CreatePagingQueue, D3DKMT_CREATEPAGINGQUEUE, 0x7, NONCONST)
 DEFINE_KMT(ReserveGpuVirtualAddress, D3DDDI_RESERVEGPUVIRTUALADDRESS, 0x8, NONCONST)
 // QueryAdapterInfo is 9, see below.
 DEFINE_KMT(QueryVideoMemoryInfo, D3DKMT_QUERYVIDEOMEMORYINFO, 0xa, NONCONST)
 DEFINE_KMT(MakeResident, D3DDDI_MAKERESIDENT, 0xb, NONCONST)
 DEFINE_KMT(MapGpuVirtualAddress, D3DDDI_MAPGPUVIRTUALADDRESS, 0xc, NONCONST)
-DEFINE_KMT(Escape, D3DKMT_ESCAPE, 0xd, CONST)
+DEFINE_KMT_WITH_PDATA(Escape, D3DKMT_ESCAPE, 0xd, CONST)
 DEFINE_KMT(GetDeviceState, D3DKMT_GETDEVICESTATE, 0xe, NONCONST)
-DEFINE_KMT(SubmitCommand, D3DKMT_SUBMITCOMMAND, 0xf, CONST)
+DEFINE_KMT_WITH_PDATA(SubmitCommand, D3DKMT_SUBMITCOMMAND, 0xf, CONST)
 DEFINE_KMT(CreateSynchronizationObject2, D3DKMT_CREATESYNCHRONIZATIONOBJECT2, 0x10, NONCONST)
 DEFINE_KMT(SignalSynchronizationObject2, D3DKMT_SIGNALSYNCHRONIZATIONOBJECT2, 0x11, CONST)
 DEFINE_KMT(WaitForSynchronizationObject2, D3DKMT_WAITFORSYNCHRONIZATIONOBJECT2, 0x12, CONST)
@@ -112,8 +161,8 @@ DEFINE_KMT(DestroyAllocation2, D3DKMT_DESTROYALLOCATION2, 0x13, CONST)
 DEFINE_KMT_WITH_RETRY(EnumAdapters2, D3DKMT_ENUMADAPTERS2, 0x14, CONST)
 DEFINE_KMT(CloseAdapter, D3DKMT_CLOSEADAPTER, 0x15, CONST)
 DEFINE_KMT(ChangeVideoMemoryReservation, D3DKMT_CHANGEVIDEOMEMORYRESERVATION, 0x16, CONST)
-DEFINE_KMT(CreateHwContext, D3DKMT_CREATEHWCONTEXT, 0x17, NONCONST)
-DEFINE_KMT(CreateHwQueue, D3DKMT_CREATEHWQUEUE, 0x18, NONCONST)
+DEFINE_KMT_WITH_PDATA(CreateHwContext, D3DKMT_CREATEHWCONTEXT, 0x17, NONCONST)
+DEFINE_KMT_WITH_PDATA(CreateHwQueue, D3DKMT_CREATEHWQUEUE, 0x18, NONCONST)
 DEFINE_KMT(DestroyDevice, D3DKMT_DESTROYDEVICE, 0x19, CONST)
 DEFINE_KMT(DestroyHwContext, D3DKMT_DESTROYHWCONTEXT, 0x1a, CONST)
 DEFINE_KMT(DestroyHwQueue, D3DKMT_DESTROYHWQUEUE, 0x1b, CONST)
@@ -140,7 +189,7 @@ DEFINE_KMT(SetContextSchedulingPriority, D3DKMT_SETCONTEXTSCHEDULINGPRIORITY, 0x
 DEFINE_KMT(SignalSynchronizationObjectFromCpu, D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMCPU, 0x31, CONST)
 DEFINE_KMT(SignalSynchronizationObjectFromGpu, D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMGPU, 0x32, CONST)
 DEFINE_KMT(SignalSynchronizationObjectFromGpu2, D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2, 0x33, CONST)
-DEFINE_KMT(SubmitCommandToHwQueue, D3DKMT_SUBMITCOMMANDTOHWQUEUE, 0x34, CONST)
+DEFINE_KMT_WITH_PDATA(SubmitCommandToHwQueue, D3DKMT_SUBMITCOMMANDTOHWQUEUE, 0x34, CONST)
 DEFINE_KMT(SubmitSignalSyncObjectsToHwQueue, D3DKMT_SUBMITSIGNALSYNCOBJECTSTOHWQUEUE, 0x35, CONST)
 DEFINE_KMT(SubmitWaitForSyncObjectsToHwQueue, D3DKMT_SUBMITWAITFORSYNCOBJECTSTOHWQUEUE, 0x36, CONST)
 DEFINE_KMT(Unlock2, D3DKMT_UNLOCK2, 0x37, CONST)
@@ -238,8 +287,11 @@ NTSTATUS LINUX_PUBLIC D3DKMTOpenResource(D3DKMT_OPENRESOURCE* pArg)
             return STATUS_NO_MEMORY;
         }
     }
+    PDDLogger logger("OpenResource", pArg->NumAllocations);
+    logger.set_args(*pArg);
     for (UINT i = 0; i < pArg->NumAllocations; i++)
     {
+        logger.set_child_pdata(i, pArg->pOpenAllocationInfo[i]);
         *(D3DDDI_OPENALLOCATIONINFO*)&pLocalAllocInfo[i] = pArg->pOpenAllocationInfo[i];
     }
     pArg->pOpenAllocationInfo2 = pLocalAllocInfo;
@@ -270,6 +322,8 @@ NTSTATUS LINUX_PUBLIC D3DKMTDestroyAllocation(CONST D3DKMT_DESTROYALLOCATION* pA
     {
         return STATUS_INVALID_PARAMETER;
     }
+    PDDLogger logger("DestroyAllocation", 0);
+    logger.set_args(*pArg);
     memcpy(&NewArg, pArg, sizeof(*pArg));
     return D3DKMTDestroyAllocation2(&NewArg);
 }
@@ -624,12 +678,17 @@ NTSTATUS APIENTRY LINUX_PUBLIC D3DKMTQueryAdapterInfo(CONST D3DKMT_QUERYADAPTERI
     D3DKMT_QUERYADAPTERINFO LocalArgs = *pArgs;
     std::unique_ptr<char[]> spLocalMem;
 
+    PDDLogger logger("QueryAdapterInfo", 0);
+
     try
     {
         if constexpr (sizeof(wchar_t) != 2)
         {
             switch (pArgs->Type)
             {
+                case KMTQAITYPE_UMDRIVERPRIVATE:
+                    logger.set_pdata(*pArgs);
+                    break;
 #define QUERYADAPTERINFO_STRINGCONVERTINPUT(QAITYPE, KMTSTRUCT) \
     case QAITYPE: RETURN_IF_NTSTATUS_FAILED((CopyAndConvertCharsInput<KMTSTRUCT, KMTSTRUCT##_WCHAR16>(pArgs, spLocalMem, LocalArgs))); break;
                 QUERYADAPTERINFO_STRINGCONVERTCASES(QUERYADAPTERINFO_STRINGCONVERTINPUT)
